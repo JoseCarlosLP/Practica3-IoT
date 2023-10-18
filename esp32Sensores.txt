@@ -1,0 +1,166 @@
+#include <WiFi.h>
+#include <PubSubClient.h>
+#include "DHTesp.h" //Libreria utilizada para el uso del sensor de humedad y temperatura DHT11, 
+                    //buscar como DHT sensor library for ESPx para su instalacion.
+const char * WIFI_SSID = "XRN";
+const char * WIFI_PASS = "joseclp08";
+const char * MQTT_BROKER = "broker.hivemq.com";
+const int MQTT_BROKER_PORT = 1883;
+const char * MQTT_CLIENT_ID = "esp38pines";
+const char * SUBSCRIBE_TOPIC = "ucbcbaibq1/in"; 
+
+const char * PUBLISH_TOPIC_TEMPERATURE = "ucbcbaibq1/t";
+const char * PUBLISH_TOPIC_HUMIDITY = "ucbcbaibq1/h";
+const char * PUBLISH_TOPIC_DISTANCE = "ucbcbaibq1/d";
+const char * PUBLISH_TOPIC_LEDS = "ucbcbaibq1/leds";
+
+const int SENSOR_DHT = 23;
+const String RED_LED="100";
+const String YELLOW_LED="010";
+const String GREEN_LED="001";
+
+float temperature = 0;
+float humidity = 0;
+float distance = 0;
+
+DHTesp dht;
+WiFiClient wiFiClient;
+PubSubClient mqttClient(wiFiClient);
+
+void publishLedByParameter(float parameter){
+  if(parameter>=70){
+    mqttClient.publish(PUBLISH_TOPIC_LEDS, GREEN_LED.c_str()); 
+  }
+  else if(parameter<=30){
+    mqttClient.publish(PUBLISH_TOPIC_LEDS, RED_LED.c_str()); 
+  }
+  else{
+    mqttClient.publish(PUBLISH_TOPIC_LEDS, YELLOW_LED.c_str());
+  }
+}
+
+void selectParameter(String parameter){
+  if(parameter=="humidity"){
+    publishLedByParameter(humidity);
+  }
+  else {
+    if(parameter=="temperature"){
+      publishLedByParameter(temperature);
+    }
+    else{
+      publishLedByParameter(distance);
+    }
+  }
+}
+
+void callback(const char * topic, byte * payload, unsigned int lenght) {
+  String message;
+  for (int i = 0; i < lenght; i++) {
+    message += String((char) payload[i]);
+  }
+  if (String(topic) == SUBSCRIBE_TOPIC) {
+    Serial.println("Message from topic " + String(topic) + ":" + message);
+    if (message == "HUMEDAD") {
+      selectParameter("humidity");
+    } 
+    else {
+      if (message == "TEMPERATURA") {
+        selectParameter("temperature");
+      }
+      else{
+        selectParameter("distance");
+      } 
+    }
+  }
+}
+
+boolean mqttClientConnect() {
+  Serial.print("Connecting to " + String(MQTT_BROKER));
+  if (mqttClient.connect(MQTT_CLIENT_ID)) {
+    Serial.println(" DONE!");
+    mqttClient.subscribe(SUBSCRIBE_TOPIC);
+    Serial.println("Subscribed to " + String(SUBSCRIBE_TOPIC));
+  } else {
+    Serial.println("Can't connect to " + String(MQTT_BROKER));
+  }
+  return mqttClient.connected();
+}
+
+long readUltrasonicDistance(int triggerPin, int echoPin){
+  pinMode(triggerPin, OUTPUT); 
+  digitalWrite(triggerPin, LOW);
+  delayMicroseconds(2);
+  digitalWrite(triggerPin, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(triggerPin, LOW);
+  pinMode(echoPin, INPUT);
+  return pulseIn(echoPin, HIGH);
+}
+
+void setup() {
+  Serial.begin(115200);
+  Serial.print("Connecting to " + String(WIFI_SSID));
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(200);
+    Serial.print(".");
+  }
+  Serial.println(" DONE!");
+
+  mqttClient.setServer(MQTT_BROKER, MQTT_BROKER_PORT);
+  mqttClient.setCallback(callback);
+
+  dht.setup(SENSOR_DHT, DHTesp::DHT11);
+}
+
+unsigned long previousConnectMillis = 0;
+unsigned long previousPublishMillis = 0;
+
+void getDataFromSensors(){
+  TempAndHumidity data = dht.getTempAndHumidity();
+  temperature = data.temperature;
+  humidity = data.humidity;
+  delay(200);
+  distance = 0.01723 * readUltrasonicDistance(13, 12);
+}
+
+String humidity_string;
+String temperature_string;
+String distance_string;
+
+void convertDataToString(){
+  humidity_string = String(humidity);
+  temperature_string = String(temperature);
+  distance_string = String (distance);
+}
+
+void printData(){
+  Serial.println("Temperatura: " + temperature_string + "°C");
+  Serial.println("Humedad: " + humidity_string + "%");
+  Serial.println("Distancia: " + distance_string + " cm");
+  Serial.println("---");
+}
+
+void loop() {
+  delay(1000);
+  getDataFromSensors();
+  convertDataToString();
+  printData();
+  unsigned long now = millis();
+  if (!mqttClient.connected()) {
+    if (now - previousConnectMillis >= 2000) {
+      previousConnectMillis = now;
+      if (mqttClientConnect()) previousConnectMillis = 0;
+      else delay(1000);
+    }
+  } else { 
+    mqttClient.loop();
+    delay(20);
+    if (now - previousPublishMillis >= 2500) {
+      previousPublishMillis = now;
+      mqttClient.publish(PUBLISH_TOPIC_HUMIDITY,humidity_string.c_str());
+      mqttClient.publish(PUBLISH_TOPIC_TEMPERATURE, temperature_string.c_str());
+      mqttClient.publish(PUBLISH_TOPIC_DISTANCE, distance_string.c_str());
+    }
+  }
+}
